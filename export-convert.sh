@@ -11,6 +11,32 @@ source "$CONFIG"
 PMD3="$PMD3_VENV/bin/pymobiledevice3"
 MANIFEST="$EXPORT_DIR/.synced-manifest"
 
+# ===== SPINNER =====
+_SPINNER_PID=""
+_spinner() {
+  local msg="$1"
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while true; do
+    printf "\r  %s  %s " "${frames[$((i % 10))]}" "$msg"
+    sleep 0.1
+    ((i++))
+  done
+}
+start_spinner() {
+  [ -t 1 ] || return
+  _spinner "$1" &
+  _SPINNER_PID=$!
+}
+stop_spinner() {
+  [ -z "$_SPINNER_PID" ] && return
+  kill "$_SPINNER_PID" 2>/dev/null
+  wait "$_SPINNER_PID" 2>/dev/null
+  printf "\r\033[K"
+  _SPINNER_PID=""
+}
+trap 'stop_spinner' EXIT
+
 send_telegram() {
   [ -z "$TELEGRAM_BOT_TOKEN" ] && return
   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -51,11 +77,14 @@ mkdir -p "$EXPORT_DIR"
 touch "$MANIFEST"
 
 # ===== CHECK FOR IPHONE VIA USB =====
-if ! "$PMD3" usbmux list 2>/dev/null | grep -q '"ConnectionType": "USB"'; then
+start_spinner "Looking for iPhone..."
+usb_list=$("$PMD3" usbmux list 2>/dev/null)
+stop_spinner
+if ! echo "$usb_list" | grep -q '"ConnectionType": "USB"'; then
   exit 0
 fi
 
-UDID=$("$PMD3" usbmux list 2>/dev/null | python3 -c "
+UDID=$(echo "$usb_list" | python3 -c "
 import json, sys
 devs = json.load(sys.stdin)
 for d in devs:
@@ -68,8 +97,12 @@ if [ -z "$UDID" ]; then
   exit 0
 fi
 
+[ -t 1 ] && echo "  iPhone found (UDID: ${UDID:0:8}...)"
+
 # ===== LIST FILES ON IPHONE =====
+start_spinner "Reading iPhone DCIM..."
 iphone_files=$("$PMD3" afc ls --udid "$UDID" -r /DCIM 2>/dev/null | grep -E '/[0-9]+APPLE/' | sed 's|^/DCIM/||')
+stop_spinner
 
 if [ -z "$iphone_files" ]; then
   exit 0

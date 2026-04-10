@@ -13,6 +13,32 @@ ANDROID_LOCAL_IP_FILE="$EXPORT_DIR/.android-local-ip"
 MANIFEST="$EXPORT_DIR/.android-synced-manifest"
 MIN_FREE_KB="${ANDROID_MIN_FREE_KB:-$((15 * 1024 * 1024))}"
 
+# ===== SPINNER =====
+_SPINNER_PID=""
+_spinner() {
+  local msg="$1"
+  local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+  local i=0
+  while true; do
+    printf "\r  %s  %s " "${frames[$((i % 10))]}" "$msg"
+    sleep 0.1
+    ((i++))
+  done
+}
+start_spinner() {
+  [ -t 1 ] || return
+  _spinner "$1" &
+  _SPINNER_PID=$!
+}
+stop_spinner() {
+  [ -z "$_SPINNER_PID" ] && return
+  kill "$_SPINNER_PID" 2>/dev/null
+  wait "$_SPINNER_PID" 2>/dev/null
+  printf "\r\033[K"
+  _SPINNER_PID=""
+}
+trap 'stop_spinner' EXIT
+
 send_telegram() {
   [ -z "$TELEGRAM_BOT_TOKEN" ] && return
   curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -40,14 +66,17 @@ ensure_tailscale() {
   if ! "$TAILSCALE" status >/dev/null 2>&1; then
     echo "$(date): [android-sync] not on home network, starting Tailscale..."
     open -a Tailscale 2>/dev/null
-    # Give it up to 10 seconds to connect
+    start_spinner "Connecting Tailscale..."
     for i in $(seq 1 10); do
       sleep 1
       if "$TAILSCALE" status >/dev/null 2>&1; then
+        stop_spinner
+        echo "  ✓  Tailscale connected"
         echo "$(date): [android-sync] Tailscale connected"
         return
       fi
     done
+    stop_spinner
     echo "$(date): [android-sync] Tailscale did not connect in time"
   fi
 }
@@ -81,22 +110,27 @@ find_android() {
       cached_subnet=$(echo "$last_ip" | sed 's/\.[0-9]*$/\./')
       if [ "$cached_subnet" = "$subnet" ]; then
         echo "$(date): [android-sync] trying cached IP: $last_ip"
+        start_spinner "Connecting to Android ($last_ip)..."
         if try_ssh "$last_ip"; then
+          stop_spinner
           ANDROID_IP="$last_ip"
           SYNC_METHOD="local"
           echo "$(date): [android-sync] connected LOCAL SSH at $last_ip"
           return 0
         fi
+        stop_spinner
         echo "$(date): [android-sync] cached IP failed"
       else
         echo "$(date): [android-sync] cached IP $last_ip not on current subnet, skipping"
       fi
     fi
 
+    start_spinner "Scanning local network for Android..."
     for i in $(seq 1 30); do
       local try_ip="${subnet}${i}"
       [ "$try_ip" = "$last_ip" ] && continue
       if nc -z -G 1 "$try_ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
+        stop_spinner
         echo "$(date): [android-sync] found SSH at ${try_ip}:${ANDROID_SSH_PORT}"
         if try_ssh "$try_ip"; then
           ANDROID_IP="$try_ip"
@@ -107,6 +141,7 @@ find_android() {
         fi
       fi
     done
+    stop_spinner
   else
     echo "$(date): [android-sync] no local network (en0 down), skipping local scan"
   fi
@@ -116,17 +151,20 @@ find_android() {
     return 1
   fi
 
-  echo "$(date): [android-sync] trying Tailscale SSH..."
+  start_spinner "Connecting via Tailscale..."
   if "$TAILSCALE" status >/dev/null 2>&1; then
     if try_ssh "$ANDROID_TAILSCALE_IP"; then
+      stop_spinner
       ANDROID_IP="$ANDROID_TAILSCALE_IP"
       SYNC_METHOD="tailscale"
       echo "$(date): [android-sync] connected via Tailscale SSH"
       return 0
     else
+      stop_spinner
       echo "$(date): [android-sync] Tailscale SSH failed"
     fi
   else
+    stop_spinner
     echo "$(date): [android-sync] Tailscale not running"
   fi
 
