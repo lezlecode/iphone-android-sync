@@ -115,6 +115,7 @@ id
 | Command | What it does |
 |---|---|
 | `sync-import` | Pull new photos/videos from iPhone only |
+| `sync-push` | Push staged files to Android only |
 | `sync-now` | Pull from iPhone + push to Android |
 | `sync-status` | Show auto-sync state and last 5 log lines |
 | `sync-enable` | Start background auto-sync every 2 min (persists across reboots) |
