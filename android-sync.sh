@@ -48,53 +48,47 @@ send_telegram() {
 }
 
 # ===== TAILSCALE AUTO-CONNECT =====
-# If away from the home network, ensure Tailscale is running before trying to sync.
+# Ensure Tailscale is running. On same-network, Tailscale uses a direct P2P
+# WireGuard path (no relay), so speed is equivalent to raw local transfer.
 ensure_tailscale() {
-  if [ -z "$ANDROID_TAILSCALE_IP" ]; then
-    return  # Tailscale not configured
-  fi
+  [ -z "$ANDROID_TAILSCALE_IP" ] && return
 
-  local current_ssid
-  current_ssid=$(networksetup -getairportnetwork en0 2>/dev/null | sed 's/Current Wi-Fi Network: //')
-
-  if [ -n "$HOME_WIFI_SSID" ] && [ "$current_ssid" = "$HOME_WIFI_SSID" ]; then
-    echo "$(date): [android-sync] on home network ($HOME_WIFI_SSID), Tailscale not needed"
-    return
-  fi
-
-  # Not on home network — make sure Tailscale is up
   if ! "$TAILSCALE" status >/dev/null 2>&1; then
-    echo "$(date): [android-sync] not on home network, starting Tailscale..."
-    # tailscale up actively connects; open -a is UI-only and doesn't trigger auth
+    echo "$(date): [android-sync] starting Tailscale..."
     "$TAILSCALE" up >/dev/null 2>&1 &
     open -a Tailscale 2>/dev/null
-    start_spinner "Connecting Tailscale..."
+    start_spinner "Starting Tailscale..."
     for i in $(seq 1 30); do
       sleep 1
       if "$TAILSCALE" status >/dev/null 2>&1; then
         stop_spinner
-        echo "  ✓  Tailscale connected"
         echo "$(date): [android-sync] Tailscale connected"
         return
       fi
     done
     stop_spinner
     echo "$(date): [android-sync] Tailscale did not connect in time"
+  else
+    echo "$(date): [android-sync] Tailscale already running"
   fi
 }
 
 ensure_tailscale
 
-# ===== FIND ANDROID (local SSH first, then Tailscale) =====
+# ===== FIND ANDROID VIA TAILSCALE =====
+# Android blocks incoming TCP (sshd port 8022) on the WiFi interface — this is
+# normal Android kernel firewall behaviour. Tailscale uses WireGuard (UDP) which
+# is allowed, AND when both devices are on the same network Tailscale establishes
+# a direct peer-to-peer path (no relay) so speeds are equivalent to raw local.
 SYNC_METHOD=""
 ANDROID_IP=""
 
 try_ssh() {
   local ip="$1"
-  if ! nc -z -G 1 "$ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
+  if ! nc -z -G 2 "$ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
     return 1
   fi
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=3 -o ServerAliveInterval=3 \
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o ServerAliveInterval=3 \
       -o ServerAliveCountMax=1 -o BatchMode=yes \
       -p "$ANDROID_SSH_PORT" "$ANDROID_SSH_USER@$ip" "echo ok" >/dev/null 2>&1
 }
@@ -102,112 +96,21 @@ try_ssh() {
 find_android() {
   echo "$(date): [android-sync] find_android starting"
 
-  local subnet
-  subnet=$(ipconfig getifaddr en0 2>/dev/null | sed 's/\.[0-9]*$/./')
-  if [ -n "$subnet" ]; then
-    local last_ip
-    last_ip=$(cat "$ANDROID_LOCAL_IP_FILE" 2>/dev/null)
-    if [ -n "$last_ip" ]; then
-      local cached_subnet
-      cached_subnet=$(echo "$last_ip" | sed 's/\.[0-9]*$/\./')
-      if [ "$cached_subnet" = "$subnet" ]; then
-        echo "$(date): [android-sync] trying cached IP: $last_ip"
-        start_spinner "Connecting to Android ($last_ip)..."
-        if try_ssh "$last_ip"; then
-          stop_spinner
-          ANDROID_IP="$last_ip"
-          SYNC_METHOD="local"
-          echo "$(date): [android-sync] connected LOCAL SSH at $last_ip"
-          return 0
-        fi
-        stop_spinner
-        echo "$(date): [android-sync] cached IP failed"
-      else
-        echo "$(date): [android-sync] cached IP $last_ip not on current subnet, skipping"
-      fi
-    fi
-
-    # ARP cache scan — instant, finds any device the Mac has recently talked to
-    start_spinner "Scanning local network for Android (ARP)..."
-    arp_ips=$(arp -a 2>/dev/null | grep -oE '\(([0-9]{1,3}\.){3}[0-9]{1,3}\)' | tr -d '()')
-    for try_ip in $arp_ips; do
-      [ "$try_ip" = "$last_ip" ] && continue
-      # Only try IPs on our subnet
-      try_subnet=$(echo "$try_ip" | sed 's/\.[0-9]*$/\./')
-      [ "$try_subnet" != "$subnet" ] && continue
-      if nc -z -G 1 "$try_ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
-        stop_spinner
-        echo "$(date): [android-sync] ARP: found SSH at ${try_ip}:${ANDROID_SSH_PORT}"
-        if try_ssh "$try_ip"; then
-          ANDROID_IP="$try_ip"
-          SYNC_METHOD="local"
-          echo "$try_ip" > "$ANDROID_LOCAL_IP_FILE"
-          echo "$(date): [android-sync] connected LOCAL SSH at $try_ip (via ARP)"
-          return 0
-        fi
-      fi
-    done
-    stop_spinner
-
-    # Full subnet scan fallback (IPs 1–254)
-    start_spinner "Scanning local network for Android (full scan)..."
-    for i in $(seq 1 254); do
-      local try_ip="${subnet}${i}"
-      [ "$try_ip" = "$last_ip" ] && continue
-      if nc -z -G 1 "$try_ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
-        stop_spinner
-        echo "$(date): [android-sync] found SSH at ${try_ip}:${ANDROID_SSH_PORT}"
-        if try_ssh "$try_ip"; then
-          ANDROID_IP="$try_ip"
-          SYNC_METHOD="local"
-          echo "$try_ip" > "$ANDROID_LOCAL_IP_FILE"
-          echo "$(date): [android-sync] connected LOCAL SSH at $try_ip"
-          return 0
-        fi
-      fi
-    done
-    stop_spinner
-  else
-    echo "$(date): [android-sync] no local network (en0 down), skipping local scan"
-  fi
-
   if [ -z "$ANDROID_TAILSCALE_IP" ]; then
     echo "$(date): [android-sync] no Tailscale IP configured"
     return 1
   fi
 
-  # Start Tailscale if not running (local scan failed — needed even on home network
-  # if AP isolation is enabled on the router)
-  if ! "$TAILSCALE" status >/dev/null 2>&1; then
-    echo "$(date): [android-sync] local scan failed, starting Tailscale as fallback..."
-    "$TAILSCALE" up >/dev/null 2>&1 &
-    open -a Tailscale 2>/dev/null
-    start_spinner "Starting Tailscale (fallback)..."
-    for i in $(seq 1 30); do
-      sleep 1
-      "$TAILSCALE" status >/dev/null 2>&1 && break
-    done
+  start_spinner "Connecting to Android via Tailscale..."
+  if try_ssh "$ANDROID_TAILSCALE_IP"; then
     stop_spinner
+    ANDROID_IP="$ANDROID_TAILSCALE_IP"
+    SYNC_METHOD="tailscale"
+    echo "$(date): [android-sync] connected via Tailscale SSH"
+    return 0
   fi
-
-  start_spinner "Connecting via Tailscale..."
-  if "$TAILSCALE" status >/dev/null 2>&1; then
-    if try_ssh "$ANDROID_TAILSCALE_IP"; then
-      stop_spinner
-      ANDROID_IP="$ANDROID_TAILSCALE_IP"
-      SYNC_METHOD="tailscale"
-      echo "$(date): [android-sync] connected via Tailscale SSH"
-      return 0
-    else
-      stop_spinner
-      echo "$(date): [android-sync] Tailscale SSH failed"
-    fi
-  else
-    stop_spinner
-    echo "$(date): [android-sync] Tailscale not running"
-  fi
-
-  echo "$(date): [android-sync] no connection found"
+  stop_spinner
+  echo "$(date): [android-sync] Tailscale SSH failed — is Tailscale running on Android?"
   return 1
 }
 
