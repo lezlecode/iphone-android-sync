@@ -76,6 +76,58 @@ EOF
 mkdir -p "$EXPORT_DIR"
 touch "$MANIFEST"
 
+# ===== CHECK FOR SONY SD CARD =====
+sony_count=0
+sony_failed=0
+sony_bytes=0
+
+for vol in /Volumes/*/; do
+  clip_dir="${vol}PRIVATE/M4ROOT/CLIP"
+  [ -d "$clip_dir" ] || continue
+
+  vol_name=$(basename "$vol")
+  [ -t 1 ] && echo "Sony SD card found: $vol_name"
+  echo "$(date): [export] Sony SD card found at $vol ($clip_dir)"
+
+  shopt -s nullglob
+  all_mp4s=("$clip_dir"/*.MP4 "$clip_dir"/*.mp4)
+  shopt -u nullglob
+
+  new_mp4s=()
+  for f in "${all_mp4s[@]}"; do
+    fname=$(basename "$f")
+    grep -qxF "$fname" "$MANIFEST" 2>/dev/null || new_mp4s+=("$f")
+  done
+
+  total_mp4=${#new_mp4s[@]}
+  if [ "$total_mp4" -eq 0 ]; then
+    [ -t 1 ] && echo "  No new clips on $vol_name."
+    echo "$(date): [export] no new clips on $vol_name"
+    continue
+  fi
+
+  [ -t 1 ] && echo "Copying $total_mp4 new clip(s) from $vol_name..."
+  i=0
+  for f in "${new_mp4s[@]}"; do
+    fname=$(basename "$f")
+    ((i++))
+    [ -t 1 ] && echo -ne "  [$i/$total_mp4] $fname...\r"
+    if cp "$f" "$EXPORT_DIR/$fname"; then
+      echo "$fname" >> "$MANIFEST"
+      fsize=$(stat -f%z "$EXPORT_DIR/$fname" 2>/dev/null || echo 0)
+      sony_bytes=$((sony_bytes + fsize))
+      ((sony_count++))
+      [ -t 1 ] && printf "  [%d/%d] %-50s ✓\n" "$i" "$total_mp4" "$fname"
+    else
+      ((sony_failed++))
+      [ -t 1 ] && printf "  [!/%d] %-50s ✗\n" "$total_mp4" "$fname"
+      echo "$(date): [export] ✗ failed to copy $fname"
+    fi
+  done
+  [ -t 1 ] && echo "Done. $sony_count copied, $sony_failed failed."
+  echo "$(date): [export] Sony SD: $sony_count copied, $sony_failed failed"
+done
+
 # ===== CHECK FOR IPHONE VIA USB =====
 start_spinner "Looking for iPhone..."
 usb_list=$("$PMD3" usbmux list 2>/dev/null)
@@ -222,20 +274,45 @@ done
 [ -t 1 ] && [ "$live_count" -gt 0 ] && echo "Merged $live_count live photo(s) into motion photos."
 
 # ===== TELEGRAM NOTIFICATION =====
-if [ "$count" -gt 0 ]; then
-  size_mb=$(echo "scale=1; $total_bytes / 1048576" | bc)
+total_imported=$((count + sony_count))
+total_imported_bytes=$((total_bytes + sony_bytes))
+
+if [ "$total_imported" -gt 0 ]; then
+  size_mb=$(echo "scale=1; $total_imported_bytes / 1048576" | bc)
   if [ "$(echo "$size_mb >= 1024" | bc)" -eq 1 ]; then
     size_display="$(echo "scale=2; $size_mb / 1024" | bc) GB"
   else
     size_display="${size_mb} MB"
   fi
-  msg="📱 *iPhone import*
-${count} new files pulled (${size_display})"
-  [ "$live_count" -gt 0 ] && msg="${msg}
+
+  msg=""
+  if [ "$count" -gt 0 ]; then
+    iphone_mb=$(echo "scale=1; $total_bytes / 1048576" | bc)
+    [ "$(echo "$iphone_mb >= 1024" | bc)" -eq 1 ] && \
+      iphone_size="$(echo "scale=2; $iphone_mb / 1024" | bc) GB" || \
+      iphone_size="${iphone_mb} MB"
+    msg="📱 *iPhone import*
+${count} new files pulled (${iphone_size})"
+    [ "$live_count" -gt 0 ] && msg="${msg}
 ✨ ${live_count} live photo(s) merged"
-  [ "$failed" -gt 0 ] && msg="${msg}
+    [ "$failed" -gt 0 ] && msg="${msg}
 ⚠️ ${failed} failed"
-  [ "$live_failed" -gt 0 ] && msg="${msg}
+    [ "$live_failed" -gt 0 ] && msg="${msg}
 ⚠️ ${live_failed} live photo merge(s) failed"
+  fi
+
+  if [ "$sony_count" -gt 0 ]; then
+    sony_mb=$(echo "scale=1; $sony_bytes / 1048576" | bc)
+    [ "$(echo "$sony_mb >= 1024" | bc)" -eq 1 ] && \
+      sony_size="$(echo "scale=2; $sony_mb / 1024" | bc) GB" || \
+      sony_size="${sony_mb} MB"
+    [ -n "$msg" ] && msg="${msg}
+"
+    msg="${msg}🎥 *Sony FX30 import*
+${sony_count} clip(s) copied (${sony_size})"
+    [ "$sony_failed" -gt 0 ] && msg="${msg}
+⚠️ ${sony_failed} failed"
+  fi
+
   send_telegram "$msg"
 fi

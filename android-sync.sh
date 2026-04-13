@@ -125,8 +125,31 @@ find_android() {
       fi
     fi
 
-    start_spinner "Scanning local network for Android..."
-    for i in $(seq 1 30); do
+    # ARP cache scan — instant, finds any device the Mac has recently talked to
+    start_spinner "Scanning local network for Android (ARP)..."
+    arp_ips=$(arp -a 2>/dev/null | grep -oE '\(([0-9]{1,3}\.){3}[0-9]{1,3}\)' | tr -d '()')
+    for try_ip in $arp_ips; do
+      [ "$try_ip" = "$last_ip" ] && continue
+      # Only try IPs on our subnet
+      try_subnet=$(echo "$try_ip" | sed 's/\.[0-9]*$/\./')
+      [ "$try_subnet" != "$subnet" ] && continue
+      if nc -z -G 1 "$try_ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
+        stop_spinner
+        echo "$(date): [android-sync] ARP: found SSH at ${try_ip}:${ANDROID_SSH_PORT}"
+        if try_ssh "$try_ip"; then
+          ANDROID_IP="$try_ip"
+          SYNC_METHOD="local"
+          echo "$try_ip" > "$ANDROID_LOCAL_IP_FILE"
+          echo "$(date): [android-sync] connected LOCAL SSH at $try_ip (via ARP)"
+          return 0
+        fi
+      fi
+    done
+    stop_spinner
+
+    # Full subnet scan fallback (IPs 1–254)
+    start_spinner "Scanning local network for Android (full scan)..."
+    for i in $(seq 1 254); do
       local try_ip="${subnet}${i}"
       [ "$try_ip" = "$last_ip" ] && continue
       if nc -z -G 1 "$try_ip" "$ANDROID_SSH_PORT" 2>/dev/null; then
