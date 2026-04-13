@@ -129,18 +129,23 @@ try_ssh() {
 find_android() {
   _log "connecting to Android..."
   [ -z "$ANDROID_TAILSCALE_IP" ] && { _err "No Tailscale IP configured"; return 1; }
+  # Retry up to 5 times — the peer route can take a few seconds to establish
+  # after Tailscale itself reports connected.
   start_spinner "Connecting to Android..."
-  if try_ssh "$ANDROID_TAILSCALE_IP"; then
-    stop_spinner
-    ANDROID_IP="$ANDROID_TAILSCALE_IP"
-    SYNC_METHOD="tailscale"
-    _ok "Connected  ·  $ANDROID_IP"
-    _log "connected via Tailscale SSH at $ANDROID_IP"
-    return 0
-  fi
+  for attempt in 1 2 3 4 5; do
+    if try_ssh "$ANDROID_TAILSCALE_IP"; then
+      stop_spinner
+      ANDROID_IP="$ANDROID_TAILSCALE_IP"
+      SYNC_METHOD="tailscale"
+      _ok "Connected  ·  $ANDROID_IP"
+      _log "connected via Tailscale SSH at $ANDROID_IP (attempt $attempt)"
+      return 0
+    fi
+    [ $attempt -lt 5 ] && sleep 3
+  done
   stop_spinner
   _err "Could not reach Android — is Tailscale running on the phone?"
-  _log "Tailscale SSH failed"
+  _log "Tailscale SSH failed after 5 attempts"
   return 1
 }
 
