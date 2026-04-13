@@ -65,9 +65,11 @@ ensure_tailscale() {
   # Not on home network — make sure Tailscale is up
   if ! "$TAILSCALE" status >/dev/null 2>&1; then
     echo "$(date): [android-sync] not on home network, starting Tailscale..."
+    # tailscale up actively connects; open -a is UI-only and doesn't trigger auth
+    "$TAILSCALE" up >/dev/null 2>&1 &
     open -a Tailscale 2>/dev/null
     start_spinner "Connecting Tailscale..."
-    for i in $(seq 1 10); do
+    for i in $(seq 1 30); do
       sleep 1
       if "$TAILSCALE" status >/dev/null 2>&1; then
         stop_spinner
