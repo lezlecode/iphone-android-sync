@@ -176,6 +176,20 @@ find_android() {
     return 1
   fi
 
+  # Start Tailscale if not running (local scan failed — needed even on home network
+  # if AP isolation is enabled on the router)
+  if ! "$TAILSCALE" status >/dev/null 2>&1; then
+    echo "$(date): [android-sync] local scan failed, starting Tailscale as fallback..."
+    "$TAILSCALE" up >/dev/null 2>&1 &
+    open -a Tailscale 2>/dev/null
+    start_spinner "Starting Tailscale (fallback)..."
+    for i in $(seq 1 30); do
+      sleep 1
+      "$TAILSCALE" status >/dev/null 2>&1 && break
+    done
+    stop_spinner
+  fi
+
   start_spinner "Connecting via Tailscale..."
   if "$TAILSCALE" status >/dev/null 2>&1; then
     if try_ssh "$ANDROID_TAILSCALE_IP"; then
